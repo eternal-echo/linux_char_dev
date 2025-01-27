@@ -13,6 +13,9 @@ static int open_count = 0;
 static struct cdev static_cdev;  // 字符设备结构
 static dev_t dev_num;  // 设备号
 
+static char device_buffer[BUFFER_SIZE];
+static size_t data_size = 0;
+
 // 打开设备
 static int char_dev_open(struct inode *inode, struct file *file)
 {
@@ -30,18 +33,31 @@ static int char_dev_release(struct inode *inode, struct file *file)
 
 // 读取设备
 static ssize_t char_dev_read(struct file *file, char __user *user_buffer,
-                            size_t count, loff_t *position)
+                             size_t count, loff_t *position)
 {
-    printk(KERN_INFO "Reading %zu bytes from device\n", (size_t)0);
-    return (ssize_t)0;
+    size_t bytes_to_read = (count < data_size) ? count : data_size;
+    if (bytes_to_read == 0)
+        return 0;
+
+    if (copy_to_user(user_buffer, device_buffer, bytes_to_read))
+        return -EFAULT;
+
+    printk(KERN_INFO "Reading %zu bytes from device\n", bytes_to_read);
+    data_size = 0; // 读完清空
+    return bytes_to_read;
 }
 
 // 写入设备
 static ssize_t char_dev_write(struct file *file, const char __user *user_buffer,
-                             size_t count, loff_t *position)
+                              size_t count, loff_t *position)
 {
-    printk(KERN_INFO "Writing %zu bytes to device\n", count);
-    return count;
+    size_t bytes_to_write = (count < BUFFER_SIZE) ? count : BUFFER_SIZE;
+    if (copy_from_user(device_buffer, user_buffer, bytes_to_write))
+        return -EFAULT;
+
+    data_size = bytes_to_write;
+    printk(KERN_INFO "Writing %zu bytes to device: %s\n", data_size, device_buffer);
+    return data_size;
 }
 
 // 文件操作结构体
