@@ -5,29 +5,31 @@
 #include <linux/cdev.h>
 #include <linux/uaccess.h>  // copy_to_user, copy_from_user
 
-#define DEVICE_NAME "static_chardev"  // 设备名称
-#define DEVICE_MAJOR 0  // 自动分配主设备号
-#define BUFFER_SIZE 1024  // FIFO缓冲区大小
+#include "char_dev.h"
 
-static int open_count = 0;
-static struct cdev static_cdev;  // 字符设备结构
-static dev_t dev_num;  // 设备号
+static int chardev_major = CHARDEV_DEVICE_MAJOR;
+static int chardev_minor = CHARDEV_DEVICE_MINOR;
+static int chardev_count = CHARDEV_DEVICE_COUNT;
+static char chardev_name[] = CHARDEV_DEVICE_NAME;
 
-static char device_buffer[BUFFER_SIZE];
-static size_t data_size = 0;
+static char_dev_t *chardevs = NULL;
 
 // 打开设备
 static int char_dev_open(struct inode *inode, struct file *file)
 {
-    open_count++;
-    printk(KERN_INFO "Device opened %d times\n", open_count);
+    // 获取设备结构体
+    char_dev_t *chardev = container_of(inode->i_cdev, char_dev_t, cdev);
+    // 将设备结构体指针存入file->private_data
+    file->private_data = chardev;
+
+    printk(KERN_INFO "Char device opened\n");
     return 0;
 }
 
 // 关闭设备
 static int char_dev_release(struct inode *inode, struct file *file)
 {
-    printk(KERN_INFO "Device closed\n");
+    printk(KERN_INFO "Char device closed\n");
     return 0;
 }
 
@@ -35,15 +37,16 @@ static int char_dev_release(struct inode *inode, struct file *file)
 static ssize_t char_dev_read(struct file *file, char __user *user_buffer,
                              size_t count, loff_t *position)
 {
-    size_t bytes_to_read = (count < data_size) ? count : data_size;
+    char_dev_t *chardev = file->private_data; // 从file->private_data获取设备结构体指针
+    size_t bytes_to_read = (count < chardev->len) ? count : chardev->len;
     if (bytes_to_read == 0)
         return 0;
 
-    if (copy_to_user(user_buffer, device_buffer, bytes_to_read))
+    if (copy_to_user(user_buffer, chardev->buffer, bytes_to_read))
         return -EFAULT;
 
     printk(KERN_INFO "Reading %zu bytes from device\n", bytes_to_read);
-    data_size = 0; // 读完清空
+    chardev->len = 0;
     return bytes_to_read;
 }
 
@@ -51,13 +54,19 @@ static ssize_t char_dev_read(struct file *file, char __user *user_buffer,
 static ssize_t char_dev_write(struct file *file, const char __user *user_buffer,
                               size_t count, loff_t *position)
 {
-    size_t bytes_to_write = (count < BUFFER_SIZE) ? count : BUFFER_SIZE;
-    if (copy_from_user(device_buffer, user_buffer, bytes_to_write))
+    
+    char_dev_t *chardev = file->private_data;
+    size_t remaining_space = BUFFER_SIZE - chardev->len;
+    size_t bytes_to_write = (count < remaining_space) ? count : remaining_space;
+    if (bytes_to_write == 0)
+        return -ENOSPC;
+
+    if (copy_from_user(chardev->buffer + chardev->len, user_buffer, bytes_to_write))
         return -EFAULT;
 
-    data_size = bytes_to_write;
-    printk(KERN_INFO "Writing %zu bytes to device: %s\n", data_size, device_buffer);
-    return data_size;
+    printk(KERN_INFO "Writing %zu bytes to device\n", bytes_to_write);
+    chardev->len += bytes_to_write;
+    return bytes_to_write;
 }
 
 // 文件操作结构体
@@ -69,41 +78,91 @@ static struct file_operations fops = {
     .release = char_dev_release,
 };
 
-// 模块初始化
-static int __init char_dev_init(void)
-{
-    int ret;
-
-    // 动态分配设备号
-    ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
-    if (ret < 0) {
-        printk(KERN_ERR "Failed to allocate device number\n");
-        return ret;
-    }
-
-    // 初始化字符设备
-    cdev_init(&static_cdev, &fops);
-    static_cdev.owner = THIS_MODULE;
-
-    // 添加字符设备
-    ret = cdev_add(&static_cdev, dev_num, 1);
-    if (ret < 0) {
-        printk(KERN_ERR "Failed to add character device\n");
-        unregister_chrdev_region(dev_num, 1);
-        return ret;
-    }
-
-    printk(KERN_INFO "Character device registered with major number %d\n", 
-           MAJOR(dev_num));
-    return 0;
-}
 
 // 模块清理
 static void __exit char_dev_exit(void)
 {
-    cdev_del(&static_cdev);
-    unregister_chrdev_region(dev_num, 1);
-    printk(KERN_INFO "Character device unregistered\n");
+    int i;
+    dev_t dev = MKDEV(chardev_major, chardev_minor);
+
+    if (chardevs) {
+        for (i = 0; i < chardev_count; i++) {
+            cdev_del(&chardevs[i].cdev);
+        }
+        kfree(chardevs);
+    }
+    if (chardev_major != 0) {
+        unregister_chrdev_region(dev, chardev_count);
+    }
+}
+
+
+// 模块初始化
+static int __init char_dev_init(void)
+{
+	int result, i;
+	dev_t dev = 0;
+
+    // 根据DEVICE_MAJOR选择动态或静态分配设备号
+    if (chardev_major) {
+        // 静态分配设备号
+        dev = MKDEV(chardev_major, chardev_minor);
+        result = register_chrdev_region(dev, chardev_count, chardev_name);
+        if (result < 0) {
+            printk(KERN_ERR "Failed to register static major %d\n", chardev_major);
+            goto fail;
+        }
+    } else {
+        // 动态分配设备号
+        result = alloc_chrdev_region(&dev, chardev_minor, chardev_count, chardev_name);
+        chardev_major = MAJOR(dev);
+        if (result < 0) {
+            printk(KERN_ERR "Failed to alloc dynamic major\n");
+            goto fail;
+        }
+    }
+
+    // 分配字符设备结构体
+    chardevs = kmalloc(chardev_count * sizeof(char_dev_t), GFP_KERNEL);
+    if (!chardevs) {
+        result = -ENOMEM;
+        goto fail_region;
+    }
+    memset(chardevs, 0, chardev_count * sizeof(char_dev_t));
+
+    // 初始化字符设备
+    for (i = 0; i < chardev_count; i++) {
+        cdev_init(&chardevs[i].cdev, &fops);
+        chardevs[i].cdev.owner = THIS_MODULE;
+        chardevs[i].len = 0;
+        result = cdev_add(&chardevs[i].cdev, dev + i, 1);
+        if (result < 0) {
+            printk(KERN_ERR "Failed to add char device\n");
+            goto fail_cdev;
+        }
+    }
+
+    printk(KERN_INFO "Char device driver initialized\n");
+    return 0;
+
+fail_cdev:
+    // 回滚已添加的字符设备
+    for (i--; i >= 0; i--) {
+        cdev_del(&chardevs[i].cdev);
+    }
+    kfree(chardevs);
+    chardevs = NULL;
+
+fail_region:
+    if (chardev_major != 0) {
+        unregister_chrdev_region(dev, chardev_count);
+    }
+
+    printk(KERN_ERR "Failed to initialize char device\n");
+
+fail:
+    unregister_chrdev_region(dev, chardev_count);
+    return result;
 }
 
 module_init(char_dev_init);

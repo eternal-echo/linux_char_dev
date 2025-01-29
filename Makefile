@@ -7,12 +7,20 @@ all:
 
 load:
 	sudo insmod char_dev.ko
-	sudo mknod /dev/static_chardev c 235 0
-	sudo chmod 666 /dev/static_chardev
+	sudo mknod /dev/static_chardev0 c 235 0
+	sudo mknod /dev/static_chardev1 c 235 1
+	sudo chmod 666 /dev/static_chardev*
+	ls /dev/static_chardev* -al
+
+test:
+	echo "Device0 Data" > /dev/static_chardev0
+	cat /dev/static_chardev0
+	echo "Device1 Data" > /dev/static_chardev1
+	cat /dev/static_chardev1
 
 # 卸载模块
 unload:
-	sudo rm -f /dev/static_chardev
+	sudo rm -f /dev/static_chardev*
 	sudo rmmod char_dev
 
 clean:
