@@ -9,6 +9,9 @@
 #define CHARDEV_DEVICE_COUNT 2
 #define BUFFER_SIZE 1024
 
+#define IOCTL_GET_LEN  _IOR('c', 1, int)  // 读取缓冲区长度
+#define IOCTL_CLR_BUF  _IO('c', 2)        // 清空缓冲区
+
 struct char_dev {
     struct cdev cdev;
     char buffer[BUFFER_SIZE];

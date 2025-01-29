@@ -69,6 +69,33 @@ static ssize_t char_dev_write(struct file *file, const char __user *user_buffer,
     return bytes_to_write;
 }
 
+// ioctl 处理函数
+static long char_dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    char_dev_t *chardev = file->private_data;
+    int result = 0;
+
+    switch (cmd) {
+    case IOCTL_GET_LEN:
+        if (copy_to_user((int __user *)arg, &chardev->len, sizeof(int)))
+            return -EFAULT;
+        printk(KERN_INFO "IOCTL_GET_LEN: %zu\n", chardev->len);
+        break;
+
+    case IOCTL_CLR_BUF:
+        memset(chardev->buffer, 0, BUFFER_SIZE);
+        chardev->len = 0;
+        printk(KERN_INFO "IOCTL_CLR_BUF: Buffer cleared\n");
+        break;
+
+    default:
+        return -EINVAL;
+    }
+
+    return result;
+}
+
+
 // 文件操作结构体
 static struct file_operations fops = {
     .owner = THIS_MODULE,
@@ -76,6 +103,7 @@ static struct file_operations fops = {
     .write = char_dev_write,
     .open = char_dev_open,
     .release = char_dev_release,
+    .unlocked_ioctl = char_dev_ioctl, // 添加 ioctl 处理
 };
 
 
