@@ -4,6 +4,8 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>  // copy_to_user, copy_from_user
+#include <linux/proc_fs.h>  // 添加proc文件支持接口
+#include <linux/seq_file.h> // 添加seq接口支持
 
 #include "char_dev.h"
 
@@ -13,6 +15,56 @@ static int chardev_count = CHARDEV_DEVICE_COUNT;
 static char chardev_name[] = CHARDEV_DEVICE_NAME;
 
 static char_dev_t *chardevs = NULL;
+/* proc 文件接口，实现通过 /proc/chardev 查看当前设备信息 */
+static void *chardev_seq_start(struct seq_file *s, loff_t *pos)
+{
+    if (*pos >= chardev_count)
+        return NULL;
+    return (void *)(chardevs + *pos);
+}
+
+static void *chardev_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+    (*pos)++;
+    if (*pos >= chardev_count)
+        return NULL;
+    return (void *)(chardevs + *pos);
+}
+
+static void chardev_seq_stop(struct seq_file *s, void *v)
+{
+    // 无需清理
+}
+
+static int chardev_seq_show(struct seq_file *s, void *v)
+{
+    char_dev_t *dev = (char_dev_t *)v;
+    int idx = dev - chardevs;
+    if (idx < chardev_count) {
+        seq_printf(s, "Device %d: buffer length = %zu\n", idx, dev->len);
+        seq_printf(s, "Buffer: %s\n", dev->buffer);
+    }
+    return 0;
+}
+
+static const struct seq_operations chardev_seq_ops = {
+    .start = chardev_seq_start,
+    .next  = chardev_seq_next,
+    .stop  = chardev_seq_stop,
+    .show  = chardev_seq_show,
+};
+
+static int chardev_proc_open(struct inode *inode, struct file *file)
+{
+    return seq_open(file, &chardev_seq_ops);
+}
+
+static const struct proc_ops chardev_proc_ops = {
+    .proc_open = chardev_proc_open,
+    .proc_read = seq_read,
+    .proc_lseek = seq_lseek,
+    .proc_release = seq_release,
+};
 
 // 打开设备
 static int char_dev_open(struct inode *inode, struct file *file)
@@ -113,6 +165,8 @@ static void __exit char_dev_exit(void)
     int i;
     dev_t dev = MKDEV(chardev_major, chardev_minor);
 
+    remove_proc_entry("chardev", NULL);
+
     if (chardevs) {
         for (i = 0; i < chardev_count; i++) {
             cdev_del(&chardevs[i].cdev);
@@ -170,6 +224,12 @@ static int __init char_dev_init(void)
         }
     }
 
+    struct proc_dir_entry *proc_entry = proc_create("chardev", 0, NULL, &chardev_proc_ops);
+    if (!proc_entry) {
+        printk(KERN_ERR "Failed to create /proc/chardev\n");
+        goto fail_cdev;
+    }
+
     printk(KERN_INFO "Char device driver initialized\n");
     return 0;
 
@@ -189,7 +249,6 @@ fail_region:
     printk(KERN_ERR "Failed to initialize char device\n");
 
 fail:
-    unregister_chrdev_region(dev, chardev_count);
     return result;
 }
 

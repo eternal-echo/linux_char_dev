@@ -19,6 +19,7 @@ test:
 	cat /dev/static_chardev1
 	gcc -o char_test char_test.c
 	./char_test
+	cat /proc/chardev
 
 # 卸载模块
 unload:
