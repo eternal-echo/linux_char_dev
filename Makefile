@@ -17,6 +17,8 @@ test:
 	cat /dev/static_chardev0
 	echo "Device1 Data" > /dev/static_chardev1
 	cat /dev/static_chardev1
+	gcc -o char_test char_test.c
+	./char_test
 
 # 卸载模块
 unload:
