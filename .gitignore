@@ -10,3 +10,4 @@ Module.symvers
 modules.order
 .tmp_versions
 char_test
+buffer_test

@@ -2,6 +2,9 @@
 #define CHAR_DEV_H
 
 #include <linux/cdev.h>
+#include <linux/mutex.h>
+
+#include "buffer.h"
 
 #define CHARDEV_DEVICE_NAME "chardev"
 #define CHARDEV_DEVICE_MAJOR 0
@@ -14,8 +17,8 @@
 
 struct char_dev {
     struct cdev cdev;
-    char buffer[BUFFER_SIZE];
-    size_t len;
+    struct mutex lock;
+    ring_buffer_t buffer;
 };
 typedef struct char_dev char_dev_t;
 

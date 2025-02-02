@@ -5,21 +5,27 @@
 #include <sys/ioctl.h>
 #include <string.h>
 #include <assert.h>
+#include <sys/wait.h>
 
 #define IOCTL_GET_LEN  _IOR('c', 1, int)  // 读取缓冲区长度
 #define IOCTL_CLR_BUF  _IO('c', 2)        // 清空缓冲区
 
 #define DEVICE_PATH "/dev/static_chardev0"
+#define PROCESS_COUNT 4
+#define TEST_ITERATIONS 100
 
+// assert
 #define TEST_ASSERT(condition, message) \
-    do { \
-        if (!(condition)) { \
-            printf("TEST FAILED: %s\n", message); \
-            return -1; \
-        } \
-    } while(0)
+    assert(condition)
 
-int main() {
+// #define TEST_ASSERT(condition, message) \
+//     do { \
+//         if (!(condition)) { \
+//             printf("TEST FAILED: %s\n", message); \
+//         } \
+//     } while(0)
+
+void basic_test() {
     int fd;
     char write_buf[] = "Hello, Char Device!";
     char read_buf[100];
@@ -72,5 +78,78 @@ int main() {
 
     printf("All tests passed successfully!\n");
     close(fd);
+}
+
+
+void writer_process(int index) {
+    int fd = open(DEVICE_PATH, O_WRONLY);
+    TEST_ASSERT(fd >= 0, "Writer open failed");
+
+    char write_buf[64];
+    for(int i = 0; i < TEST_ITERATIONS; i++) {
+        snprintf(write_buf, sizeof(write_buf), "P%d-I%d", index, i);
+        ssize_t written = write(fd, write_buf, strlen(write_buf));
+        TEST_ASSERT(written == strlen(write_buf), "Write failed");
+        usleep(rand() % 1000);  // 随机延时
+    }
+    close(fd);
+    exit(0);
+}
+
+void reader_process(int index) {
+    int fd = open(DEVICE_PATH, O_RDONLY);
+    TEST_ASSERT(fd >= 0, "Reader open failed");
+
+    char read_buf[64];
+    for(int i = 0; i < TEST_ITERATIONS; i++) {
+        memset(read_buf, 0, sizeof(read_buf));
+        ssize_t bytes_read = read(fd, read_buf, sizeof(read_buf));
+        if(bytes_read > 0) {
+            printf("Reader %d got: %s\n", index, read_buf);
+        }
+        usleep(rand() % 1000);
+    }
+    close(fd);
+    exit(0);
+}
+
+
+void concurrent_test() {
+    pid_t pids[PROCESS_COUNT * 2];
+    int status;
+
+    // 创建读写进程
+    for(int i = 0; i < PROCESS_COUNT; i++) {
+        // 创建写进程
+        pids[i] = fork();
+        if(pids[i] == 0) {
+            writer_process(i);
+        }
+        TEST_ASSERT(pids[i] >= 0, "Fork writer failed");
+
+        // 创建读进程
+        pids[i + PROCESS_COUNT] = fork();
+        if(pids[i + PROCESS_COUNT] == 0) {
+            reader_process(i);
+        }
+        TEST_ASSERT(pids[i + PROCESS_COUNT] >= 0, "Fork reader failed");
+    }
+
+    // 等待所有子进程结束
+    for(int i = 0; i < PROCESS_COUNT * 2; i++) {
+        waitpid(pids[i], &status, 0);
+        if(WIFEXITED(status)) {
+            printf("Process %d exited with status %d\n", 
+                   pids[i], WEXITSTATUS(status));
+        }
+    }
+
+    printf("Concurrent test completed!\n");
+}
+
+int main() {
+
+    basic_test();
+    concurrent_test();
     return 0;
 }

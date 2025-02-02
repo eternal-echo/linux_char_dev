@@ -41,8 +41,13 @@ static int chardev_seq_show(struct seq_file *s, void *v)
     char_dev_t *dev = (char_dev_t *)v;
     int idx = dev - chardevs;
     if (idx < chardev_count) {
-        seq_printf(s, "Device %d: buffer length = %zu\n", idx, dev->len);
-        seq_printf(s, "Buffer: %s\n", dev->buffer);
+        size_t len = ring_buffer_space_used(&dev->buffer);
+        seq_printf(s, "Device %d: buffer length = %zu\n", idx, len);
+        // 获取读指针和长度
+        char *raddr;
+        size_t rlen;
+        RING_BUFFER_GET_READ(&dev->buffer, raddr, rlen);
+        seq_printf(s, "Data: %.*s\n", (int)rlen, raddr);
     }
     return 0;
 }
@@ -90,35 +95,76 @@ static ssize_t char_dev_read(struct file *file, char __user *user_buffer,
                              size_t count, loff_t *position)
 {
     char_dev_t *chardev = file->private_data; // 从file->private_data获取设备结构体指针
-    size_t bytes_to_read = (count < chardev->len) ? count : chardev->len;
-    if (bytes_to_read == 0)
-        return 0;
+    char *raddr;
+    size_t rlen, total = 0;
+    ssize_t ret = 0;
+    
+    mutex_lock(&chardev->lock);
 
-    if (copy_to_user(user_buffer, chardev->buffer, bytes_to_read))
-        return -EFAULT;
+    while (count > 0) {
+        RING_BUFFER_GET_READ(&chardev->buffer, raddr, rlen);
+        if (rlen == 0) {
+            break;
+        }
+        if (rlen > count) {
+            rlen = count;
+        }
+        if (copy_to_user(user_buffer + total, raddr, rlen)) {
+            ret = -EFAULT;
+            goto out;
+        }
+        ring_buffer_seek_read(&chardev->buffer, rlen);
+        total += rlen;
+        count -= rlen;
+    }
 
-    printk(KERN_INFO "Reading %zu bytes from device\n", bytes_to_read);
-    chardev->len = 0;
-    return bytes_to_read;
+    *position += total;  // 更新读取位置
+    ret = total;
+
+    printk(KERN_INFO "Reading %zu bytes from device\n", total);
+
+out:
+    mutex_unlock(&chardev->lock);
+    return ret;
 }
+
 
 // 写入设备
 static ssize_t char_dev_write(struct file *file, const char __user *user_buffer,
                               size_t count, loff_t *position)
 {
-    
     char_dev_t *chardev = file->private_data;
-    size_t remaining_space = BUFFER_SIZE - chardev->len;
-    size_t bytes_to_write = (count < remaining_space) ? count : remaining_space;
-    if (bytes_to_write == 0)
-        return -ENOSPC;
+    char *waddr;
+    size_t wlen, total = 0;
+    ssize_t ret = 0;
 
-    if (copy_from_user(chardev->buffer + chardev->len, user_buffer, bytes_to_write))
-        return -EFAULT;
+    mutex_lock(&chardev->lock);
 
-    printk(KERN_INFO "Writing %zu bytes to device\n", bytes_to_write);
-    chardev->len += bytes_to_write;
-    return bytes_to_write;
+    while (count > 0) {
+        RING_BUFFER_GET_WRITE(&chardev->buffer, waddr, wlen);
+        if (wlen == 0) {
+            ret = -ENOSPC;
+            goto out;
+        }
+        if (wlen > count) {
+            wlen = count;
+        }
+        if (copy_from_user(waddr, user_buffer + total, wlen)) {
+            ret = -EFAULT;
+            goto out;
+        }
+        ring_buffer_seek_write(&chardev->buffer, wlen);
+        total += wlen;
+        count -= wlen;
+    }
+
+    *position += total;  
+    ret = total;
+    printk(KERN_INFO "Writing %zu bytes to device\n", total);
+
+out:
+    mutex_unlock(&chardev->lock);
+    return ret;
 }
 
 // ioctl 处理函数
@@ -127,16 +173,19 @@ static long char_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
     char_dev_t *chardev = file->private_data;
     int result = 0;
 
+    mutex_lock(&chardev->lock);
     switch (cmd) {
     case IOCTL_GET_LEN:
-        if (copy_to_user((int __user *)arg, &chardev->len, sizeof(int)))
-            return -EFAULT;
-        printk(KERN_INFO "IOCTL_GET_LEN: %zu\n", chardev->len);
+        size_t len = ring_buffer_space_used(&chardev->buffer);
+        if (copy_to_user((int __user *)arg, &len, sizeof(int))){
+            result = -EFAULT;
+            goto out;
+        }
+        printk(KERN_INFO "IOCTL_GET_LEN: %zu\n", len);
         break;
 
     case IOCTL_CLR_BUF:
-        memset(chardev->buffer, 0, BUFFER_SIZE);
-        chardev->len = 0;
+        ring_buffer_init(&chardev->buffer);
         printk(KERN_INFO "IOCTL_CLR_BUF: Buffer cleared\n");
         break;
 
@@ -144,6 +193,8 @@ static long char_dev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         return -EINVAL;
     }
 
+out:
+    mutex_unlock(&chardev->lock);
     return result;
 }
 
@@ -216,7 +267,8 @@ static int __init char_dev_init(void)
     for (i = 0; i < chardev_count; i++) {
         cdev_init(&chardevs[i].cdev, &fops);
         chardevs[i].cdev.owner = THIS_MODULE;
-        chardevs[i].len = 0;
+        ring_buffer_init(&chardevs[i].buffer);
+        mutex_init(&chardevs[i].lock);  // 初始化 mutex
         result = cdev_add(&chardevs[i].cdev, dev + i, 1);
         if (result < 0) {
             printk(KERN_ERR "Failed to add char device\n");
